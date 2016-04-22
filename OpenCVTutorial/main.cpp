@@ -17,6 +17,7 @@
 
 #include <iostream>
 #include <string>
+#include <sstream>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/core/core.hpp>
@@ -29,6 +30,9 @@ static const std::string kFrameTitleHSVFilterControls = "HSV Filter Controls";
 static const int kIDWebcam = 0;
 static const int kFrameWidth = 600;
 static const int kFrameHeight = 400;
+static const int kFontFace = 2;
+static const int kFontScale = 1;
+static const cv::Scalar kColorGreen = cv::Scalar(0,255,0);
 
 static int hueMinimum = 0;
 static int hueMaximum = 256;
@@ -38,6 +42,15 @@ static int saturationMaximum = 256;
 
 static int valueMinimum = 156;
 static int valueMaximum = 256;
+
+
+using Contours = std::vector<cv::Point>;
+
+std::string intToString(int number){
+    std::stringstream ss;
+    ss << number;
+    return ss.str();
+}
 
 void on_trackbar( int, void* )
 {
@@ -76,6 +89,101 @@ void executeMorphologicalOperations(cv::Mat& inputOutputMatrix){
     cv::dilate(/* IN */ inputOutputMatrix, /* OUT */ inputOutputMatrix, dilateMatrix);
 }
 
+
+//Draws a target icon (A circle with a + in the center) at the given coordinates.
+void drawTargetIconAtCoordinates(int x, int y,cv::Mat& cameraFeed){
+    
+    const int thickness = 2;
+    cv::circle(cameraFeed,cv::Point(x,y),20,kColorGreen,2);
+    
+    if(y -25 >0 ){
+        cv::line(cameraFeed,cv::Point(x,y),cv::Point(x,y-25),kColorGreen,thickness);
+    }else{
+        cv::line(cameraFeed,cv::Point(x,y),cv::Point(x,0),kColorGreen,thickness);
+    }
+    
+    if(y+25<kFrameHeight){
+        cv::line(cameraFeed,cv::Point(x,y),cv::Point(x,y+25),kColorGreen,thickness);
+    }else{
+        cv::line(cameraFeed,cv::Point(x,y),cv::Point(x,kFrameHeight),kColorGreen,thickness);
+    }
+    
+    if(x-25>0){
+        cv::line(cameraFeed,cv::Point(x,y),cv::Point(x-25,y),kColorGreen,thickness);
+    }
+    else{
+        cv::line(cameraFeed,cv::Point(x,y),cv::Point(0,y),kColorGreen, thickness);
+    }
+    
+    if(x+25<kFrameWidth){
+        cv::line(cameraFeed,cv::Point(x,y),cv::Point(x+25,y),kColorGreen, thickness);
+    }else{
+        cv::line(cameraFeed,cv::Point(x,y),cv::Point(kFrameWidth,y),kColorGreen,thickness);
+    }
+    
+    cv::putText(cameraFeed,intToString(x)+","+intToString(y),cv::Point(x,y+30),kFontFace,kFontScale,kColorGreen);
+    
+}
+
+void trackObjects(const cv::Mat& trackMatrix,cv::Mat& cameraFeed, int& outX, int& outY){
+    
+    cv::Mat _trackMatrix;
+    trackMatrix.copyTo(_trackMatrix);
+    
+    std::vector<Contours> contours;
+    
+    //Hierarchy is the relationship of objects within the image.
+    //For example, an image could have 3 objects: 1, 2 and 3; where object 3 is nested inside 2.
+    //In this case, object 1 and 2 are in the same hierarchy level while 3 is a child of 2 (and thus, 2 is the parent of 3.)
+    //The 'hierarchy' vector below describes the hierarchy of each contour in the 'contours' vector above.
+    //In other words, 'contours' and 'hierarchy' have the same length.
+    //The 'hierarchy' vector has a type Vec4i (a vector of 4 ints). These ints are:
+    // Int at Index 0: Index of next contour in the same level (in the 'contours' vector).
+    // Int at Index 1: Index of previous contour in the same level (in the 'contours' vector).
+    // Int at Index 2: Index of first-child contour (in the 'contours' vector)
+    // Int at Index 3: Index of parent contour (in the 'contours' vector)
+    std::vector<cv::Vec4i> hierarchy;
+    
+    //CV_RETR_CCOMP means arrange contours in a 2-level hierarchy The first level contains outer (white) objects. The second level contains all inner (black) objects.
+    //CV_RETR_LIST means ignore hierarchy and only list all contours
+    //CV_RETR_EXTERNAL means return Only the outer-most contours and ignore child contours.
+    //CV_RETR_TREE means arrange contours in a proper (as-many-levels-as-necessary) hierarchy.
+    //Reference: http://docs.opencv.org/3.1.0/d9/d8b/tutorial_py_contours_hierarchy.html#gsc.tab=0
+    cv::findContours(_trackMatrix, contours, hierarchy, CV_RETR_CCOMP, CV_CHAIN_APPROX_SIMPLE);
+    
+    double refArea = 0;
+    bool objectFound = false;
+    if (hierarchy.size() > 0) {
+        int numberOfObjects = hierarchy.size();
+        //If number of Objects > 10, the filter is probably noisy.
+        if (numberOfObjects < 10) {
+            for (int index = 0; index >= 0; index = hierarchy[index][0]) {
+                objectFound = false;
+                //Use moments method to distinguish filtered object
+                cv::Moments moment = cv::moments((cv::Mat) contours[index]);
+                double area = moment.m00;
+                
+                //1. If the area is less than 20px x 20px, it's likelt just noise
+                //2. If the area is 1.5 the size of the screen, It's likely to be caused by a bad filter.
+                //3. refArea stores the largest valid area as a standard-of-reference for future iterations
+                
+                if (area > 400 && area<((kFrameWidth * kFrameWidth)/1.5) && area > refArea) {
+                    printf("Object Found.\nArea: %f\n",area);
+                    outX = moment.m10/area;
+                    outY = moment.m01/area;
+                    objectFound = true;
+                }
+            }
+            
+            if (objectFound) {
+                cv::putText(cameraFeed, "Tracking Object", cv::Point(0,50), kFontFace, kFontScale, kColorGreen,false);
+                drawTargetIconAtCoordinates(outX,outY,cameraFeed);
+            }
+        }
+    }
+    
+}
+
 int main(int argc, const char * argv[]) {
     
     createTrackers();
@@ -104,6 +212,8 @@ int main(int argc, const char * argv[]) {
         //std::cout<<"H: "<<hueMaximum<<" S: "<<saturationMaximum<<" V: "<<valueMaximum<<"\n";
         
         executeMorphologicalOperations(hsvFilteredMatrix);
+        int x,y;
+        trackObjects(hsvFilteredMatrix, rgbMatrix, x, y);
         
         cv::imshow(kFrameTitleHSVFiltered, hsvFilteredMatrix);
         cv::imshow(kFrameTitleRGB, rgbMatrix);
